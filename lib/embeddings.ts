@@ -4,7 +4,16 @@ let embedderPipeline: any = null;
 
 async function getEmbedder() {
   if (!embedderPipeline) {
-    const { pipeline } = await import("@xenova/transformers");
+    const { pipeline, env } = await import("@xenova/transformers");
+    env.allowLocalModels = false;
+    env.useBrowserCache = false;
+    if (env.backends && env.backends.onnx) {
+      env.backends.onnx.backendPriority = ["wasm"];
+      if (env.backends.onnx.wasm) {
+        env.backends.onnx.wasm.numThreads = 1;
+        env.backends.onnx.wasm.proxy = false;
+      }
+    }
     embedderPipeline = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2");
   }
   return embedderPipeline;
