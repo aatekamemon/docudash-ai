@@ -2,14 +2,26 @@ import { NextResponse } from "next/server";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase/client";
 import { generateEmbedding } from "@/lib/embeddings";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import OpenAI from "openai";
+import { Ollama } from "ollama";
+
+// Route config - raise execution timeout for local model inference
+export const maxDuration = 180;
 
 // Provider config
 const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 const GROQ_MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
 
+const DEEPSEEK_BASE_URL = process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com";
+const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-chat";
+
+const OLLAMA_HOST = process.env.OLLAMA_HOST || "http://localhost:11434";
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "deepseek-r1:1.5b";
+const OLLAMA_QWEN_MODEL = process.env.OLLAMA_QWEN_MODEL || "qwen3:4b";
+
 // Types
-type ModelProvider = "groq" | "gemini";
+type ModelProvider = "groq" | "gemini" | "deepseek" | "ollama" | "qwen";
 
 interface HistoryMessage {
   role: "user" | "assistant";
@@ -28,6 +40,32 @@ interface DocRecord {
   id: string;
   file_name: string;
   category: string;
+}
+
+function getDeepSeekClient(): OpenAI {
+  const apiKey = process.env.DEEPSEEK_API_KEY;
+  if (!apiKey) {
+    throw new Error("DEEPSEEK_API_KEY is not configured in .env.local.");
+  }
+  return new OpenAI({
+    baseURL: DEEPSEEK_BASE_URL,
+    apiKey,
+  });
+}
+
+function getOllamaClient(): Ollama {
+  return new Ollama({
+    host: OLLAMA_HOST,
+  });
+}
+
+/**
+ * Removes <think>...</think> reasoning blocks from model responses.
+ */
+function cleanOllamaThinking(text: string): string {
+  let cleaned = text.replace(/<think>[\s\S]*?<\/think>/gi, "");
+  cleaned = cleaned.replace(/^<think>[\s\S]*$/gi, "");
+  return cleaned.trim() || text.trim();
 }
 
 // Intent detection for listing/count questions
@@ -64,8 +102,6 @@ function detectListingIntent(question: string) {
 }
 
 // Pronoun/ambiguity detector - only triggers LLM rewrite when needed.
-// Standalone questions ("CSRM hr course") skip rewriting entirely so previous
-// conversation context cannot contaminate unrelated vector searches.
 const AMBIGUOUS_PATTERNS = [
   /\bit\b|\bits\b/i,
   /\bthat\b/i,
@@ -120,6 +156,38 @@ async function rewriteQuestion(
       const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
       const result = await model.generateContent(rewritePrompt);
       return result.response.text().trim() || question;
+    } else if (provider === "deepseek") {
+      const client = getDeepSeekClient();
+      const completion = await client.chat.completions.create({
+        model: DEEPSEEK_MODEL,
+        messages: [{ role: "user", content: rewritePrompt }],
+        temperature: 0,
+        max_tokens: 120,
+      });
+      return completion.choices?.[0]?.message?.content?.trim() || question;
+    } else if (provider === "ollama") {
+      const client = getOllamaClient();
+      const response = await client.chat({
+        model: OLLAMA_MODEL,
+        messages: [{ role: "user", content: rewritePrompt }],
+        stream: false,
+        options: { num_ctx: 4096 },
+      });
+      const rawText = response.message?.content?.trim() || "";
+      const cleaned = cleanOllamaThinking(rawText);
+      return cleaned || question;
+    } else if (provider === "qwen") {
+      const client = getOllamaClient();
+      const response = await client.chat({
+        model: OLLAMA_QWEN_MODEL,
+        messages: [{ role: "user", content: rewritePrompt + " /no_think" }],
+        stream: false,
+        options: { num_ctx: 4096 },
+        keep_alive: "30m",
+      });
+      const rawText = response.message?.content?.trim() || "";
+      const cleaned = cleanOllamaThinking(rawText);
+      return cleaned || question;
     } else {
       const key = process.env.GROQ_API_KEY;
       if (!key) return question;
@@ -202,9 +270,189 @@ async function callGemini(
   } catch (err: any) {
     const msg = err?.message || String(err);
     if (msg.includes("429") || msg.toLowerCase().includes("quota") || msg.toLowerCase().includes("too many requests") || msg.toLowerCase().includes("rate limit")) {
-      throw new Error("Model limit reached. The daily free-tier quota for Gemini has been exceeded. Please switch to Groq using the model button above, or try again tomorrow.");
+      throw new Error("Model limit reached. The daily free-tier quota for Gemini has been exceeded. Please switch to Groq, Local (Ollama), or Qwen3-4B using the model button above, or try again tomorrow.");
     }
     throw err;
+  }
+}
+
+async function callDeepSeek(
+  systemPrompt: string,
+  userMessage: string,
+  history: HistoryMessage[]
+): Promise<string> {
+  const client = getDeepSeekClient();
+
+  const historyTurns = history.slice(-8).map((m) => ({
+    role: m.role === "assistant" ? ("assistant" as const) : ("user" as const),
+    content: m.content,
+  }));
+
+  try {
+    const completion = await client.chat.completions.create({
+      model: DEEPSEEK_MODEL,
+      messages: [
+        { role: "system", content: systemPrompt },
+        ...historyTurns,
+        { role: "user", content: userMessage },
+      ],
+      temperature: 0.2,
+      max_tokens: 1024,
+    });
+
+    return completion.choices?.[0]?.message?.content?.trim() || "I could not generate an answer. Please try again.";
+  } catch (err: unknown) {
+    console.error("DeepSeek API error:", err);
+    const msg = err instanceof Error ? err.message : String(err);
+    if (
+      msg.includes("401") ||
+      msg.toLowerCase().includes("authentication") ||
+      msg.toLowerCase().includes("invalid api key")
+    ) {
+      throw new Error("DeepSeek authentication failed: Invalid or missing API key. Please check DEEPSEEK_API_KEY in .env.local.");
+    }
+    if (
+      msg.includes("402") ||
+      msg.toLowerCase().includes("insufficient balance") ||
+      msg.toLowerCase().includes("balance")
+    ) {
+      throw new Error("DeepSeek account balance insufficient. Please check your DeepSeek credits at platform.deepseek.com.");
+    }
+    if (
+      msg.includes("429") ||
+      msg.toLowerCase().includes("rate limit") ||
+      msg.toLowerCase().includes("too many requests")
+    ) {
+      throw new Error("DeepSeek rate limit reached. Please wait a moment or switch to Gemini/Groq.");
+    }
+    throw new Error(`DeepSeek error: ${msg}`);
+  }
+}
+
+async function callOllama(
+  systemPrompt: string,
+  userMessage: string,
+  history: HistoryMessage[]
+): Promise<string> {
+  const client = getOllamaClient();
+
+  const historyTurns = history.slice(-8).map((m) => ({
+    role: m.role === "assistant" ? "assistant" : "user",
+    content: m.content,
+  }));
+
+  try {
+    // Timeout of 180 seconds for local model execution
+    const chatPromise = client.chat({
+      model: OLLAMA_MODEL,
+      messages: [
+        { role: "system", content: systemPrompt },
+        ...historyTurns,
+        { role: "user", content: userMessage },
+      ],
+      stream: false,
+      options: { num_ctx: 4096 },
+    });
+
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("Ollama request timed out after 180 seconds.")), 180000)
+    );
+
+    const response = await Promise.race([chatPromise, timeoutPromise]);
+    const rawContent = response.message?.content?.trim() || "";
+    const cleanContent = cleanOllamaThinking(rawContent);
+    return cleanContent || "I could not generate an answer. Please try again.";
+  } catch (err: unknown) {
+    console.error("Ollama API error:", err);
+    const msg = err instanceof Error ? err.message : String(err);
+    const lower = msg.toLowerCase();
+
+    if (
+      lower.includes("econnrefused") ||
+      lower.includes("connection refused") ||
+      lower.includes("failed to fetch") ||
+      lower.includes("connect econnrefused") ||
+      lower.includes("fetch failed")
+    ) {
+      throw new Error("Ollama is not running. Start Ollama and try again.");
+    }
+
+    if (
+      lower.includes("not found") ||
+      lower.includes("try pulling it") ||
+      (err as any)?.status === 404
+    ) {
+      throw new Error(`Model not downloaded. Run: ollama pull ${OLLAMA_MODEL}`);
+    }
+
+    throw new Error(`Ollama error: ${msg}`);
+  }
+}
+
+async function callQwen(
+  systemPrompt: string,
+  userMessage: string,
+  history: HistoryMessage[]
+): Promise<string> {
+  const client = getOllamaClient();
+
+  const historyTurns = history.slice(-8).map((m) => ({
+    role: m.role === "assistant" ? "assistant" : "user",
+    content: m.content,
+  }));
+
+  // Specific instruction required for Qwen3-4B
+  const qwenInstruction = "Answer only from the provided document text. If the answer is not in the documents, say it is not in the documents. Do not use outside knowledge.";
+  const qwenSystemPrompt = `${systemPrompt}\n\n${qwenInstruction}`;
+
+  // Turn off thinking mode for speed: append " /no_think" to the end of the final user message
+  const qwenUserMessage = userMessage.endsWith(" /no_think") ? userMessage : `${userMessage} /no_think`;
+
+  try {
+    const chatPromise = client.chat({
+      model: OLLAMA_QWEN_MODEL,
+      messages: [
+        { role: "system", content: qwenSystemPrompt },
+        ...historyTurns,
+        { role: "user", content: qwenUserMessage },
+      ],
+      stream: false,
+      options: { num_ctx: 4096 },
+      keep_alive: "30m",
+    });
+
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("Ollama request timed out after 180 seconds.")), 180000)
+    );
+
+    const response = await Promise.race([chatPromise, timeoutPromise]);
+    const rawContent = response.message?.content?.trim() || "";
+    const cleanContent = cleanOllamaThinking(rawContent);
+    return cleanContent || "I could not generate an answer. Please try again.";
+  } catch (err: unknown) {
+    console.error("Qwen (Ollama) API error:", err);
+    const msg = err instanceof Error ? err.message : String(err);
+    const lower = msg.toLowerCase();
+
+    if (
+      lower.includes("econnrefused") ||
+      lower.includes("connection refused") ||
+      lower.includes("failed to fetch") ||
+      lower.includes("connect econnrefused") ||
+      lower.includes("fetch failed")
+    ) {
+      throw new Error("Ollama is not running. Start Ollama and try again.");
+    }
+
+    if (
+      lower.includes("not found") ||
+      lower.includes("try pulling it") ||
+      (err as any)?.status === 404
+    ) {
+      throw new Error(`Model not downloaded. Run: ollama pull ${OLLAMA_QWEN_MODEL}`);
+    }
+
+    throw new Error(`Ollama error: ${msg}`);
   }
 }
 
@@ -214,13 +462,22 @@ async function generateAnswer(
   userMessage: string,
   history: HistoryMessage[]
 ): Promise<string> {
-  return provider === "gemini"
-    ? callGemini(systemPrompt, userMessage, history)
-    : callGroq(systemPrompt, userMessage, history);
+  if (provider === "gemini") {
+    return callGemini(systemPrompt, userMessage, history);
+  } else if (provider === "deepseek") {
+    return callDeepSeek(systemPrompt, userMessage, history);
+  } else if (provider === "ollama") {
+    return callOllama(systemPrompt, userMessage, history);
+  } else if (provider === "qwen") {
+    return callQwen(systemPrompt, userMessage, history);
+  } else {
+    return callGroq(systemPrompt, userMessage, history);
+  }
 }
 
 // Main handler
 export async function POST(request: Request) {
+  const startTime = Date.now();
   try {
     if (!isSupabaseConfigured()) {
       return NextResponse.json({ success: false, error: "Supabase credentials are not configured." }, { status: 500 });
@@ -228,7 +485,16 @@ export async function POST(request: Request) {
 
     const body = await request.json();
     const { question, model: modelParam, history = [] } = body;
-    const provider: ModelProvider = modelParam === "groq" ? "groq" : "gemini";
+    const provider: ModelProvider =
+      modelParam === "groq"
+        ? "groq"
+        : modelParam === "deepseek"
+        ? "deepseek"
+        : modelParam === "ollama"
+        ? "ollama"
+        : modelParam === "qwen"
+        ? "qwen"
+        : "gemini";
     const conversationHistory: HistoryMessage[] = Array.isArray(history) ? history : [];
 
     if (!question || typeof question !== "string" || question.trim().length === 0) {
@@ -236,6 +502,15 @@ export async function POST(request: Request) {
     }
 
     const q = question.trim();
+
+    // Helper to format response time label
+    const getFormattedResponseTime = () => {
+      const durationSec = ((Date.now() - startTime) / 1000).toFixed(1) + "s";
+      if (provider === "ollama") {
+        return `${OLLAMA_MODEL} · ${durationSec}`;
+      }
+      return durationSec;
+    };
 
     // Route A: Listing / count - query documents table directly
     const intent = detectListingIntent(q);
@@ -289,15 +564,21 @@ export async function POST(request: Request) {
       const systemPrompt = `You are DocuDash AI. Present the EXACT document inventory data below clearly in natural language. Do NOT add or remove items.\n\nData:\n---\n${listingContext}\n---`;
       const answer = await generateAnswer(provider, systemPrompt, `Question: ${q}`, conversationHistory);
       const sources = docs.slice(0, 20).map((d) => ({ documentId: d.id, fileName: d.file_name, category: d.category }));
+      const responseTime = getFormattedResponseTime();
 
-      return NextResponse.json({ success: true, answer, sources, routeUsed: "listing" });
+      return NextResponse.json({
+        success: true,
+        answer,
+        sources,
+        routeUsed: "listing",
+        responseTime,
+        model: provider,
+      });
     }
 
     // Route B: RAG - vector search with conditional LLM query rewriting
 
     // Step 1: Only rewrite if the question contains pronouns or implicit references.
-    // Standalone questions skip the LLM call entirely so prior context cannot
-    // contaminate unrelated searches.
     let standaloneQuestion = q;
     if (needsRewrite(q, conversationHistory)) {
       standaloneQuestion = await rewriteQuestion(provider, q, conversationHistory);
@@ -307,8 +588,6 @@ export async function POST(request: Request) {
     }
 
     // Step 2: Direct Document Mention Lookup (Hybrid Retrieval)
-    // If the question explicitly mentions a document title (e.g. "payslip 04", "invoice 11", "BYOD policy"),
-    // fetch that document's chunks directly so they are guaranteed to be in context.
     const { data: allDocsList } = await supabase.from("documents").select("id, file_name, category");
     const normQ = standaloneQuestion.toLowerCase().replace(/[_-]/g, " ");
     const directDocs = (allDocsList || []).filter((d) => {
@@ -357,11 +636,14 @@ export async function POST(request: Request) {
     }
 
     if (matchedChunks.length === 0) {
+      const responseTime = getFormattedResponseTime();
       return NextResponse.json({
         success: true,
         answer: "I could not find any relevant information in the uploaded documents to answer your question.",
         sources: [],
         routeUsed: "rag",
+        responseTime,
+        model: provider,
       });
     }
 
@@ -397,9 +679,9 @@ export async function POST(request: Request) {
       "---",
     ].join("\n");
 
-    // Step 7: Generate answer using the original question (not rewritten) for natural tone,
-    // but with full conversation history for context.
+    // Step 7: Generate answer using the original question
     const answer = await generateAnswer(provider, systemPrompt, q, conversationHistory);
+    const responseTime = getFormattedResponseTime();
 
     // Step 8: Sources
     const sources = documentIds.map((docId) => ({
@@ -413,6 +695,8 @@ export async function POST(request: Request) {
       answer,
       sources,
       routeUsed: "rag",
+      responseTime,
+      model: provider,
       ...(standaloneQuestion !== q ? { rewrittenQuestion: standaloneQuestion } : {}),
     });
 

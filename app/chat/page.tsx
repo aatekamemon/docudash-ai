@@ -16,11 +16,12 @@ import {
   Cpu,
   Zap,
   RotateCcw,
+  Laptop,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-type ModelProvider = "groq" | "gemini";
+type ModelProvider = "groq" | "gemini" | "deepseek" | "ollama" | "qwen";
 
 interface Source {
   documentId: string;
@@ -35,9 +36,10 @@ interface Message {
   sources?: Source[];
   isError?: boolean;
   model?: ModelProvider;
+  responseTime?: string;
 }
 
-// ── Markdown renderer for AI responses ───────────────────────────────────────
+// ── Markdown renderer for AI responses ─────────────────────────────────────────
 function MarkdownContent({ content, isUser }: { content: string; isUser: boolean }) {
   if (isUser) {
     return <p className="whitespace-pre-wrap">{content}</p>;
@@ -84,7 +86,7 @@ function MarkdownContent({ content, isUser }: { content: string; isUser: boolean
 // ── Model badge colours ───────────────────────────────────────────────────────
 const MODEL_BADGE: Record<
   ModelProvider,
-  { label: string; bg: string; text: string; border: string; icon: React.ReactNode }
+  { label: string; dropdownLabel?: string; bg: string; text: string; border: string; icon: React.ReactNode }
 > = {
   groq: {
     label: "Groq",
@@ -99,6 +101,29 @@ const MODEL_BADGE: Record<
     text: "text-blue-700",
     border: "border-blue-200",
     icon: <Cpu className="w-3 h-3 text-blue-500" />,
+  },
+  deepseek: {
+    label: "DeepSeek",
+    bg: "bg-cyan-50",
+    text: "text-cyan-700",
+    border: "border-cyan-200",
+    icon: <Sparkles className="w-3 h-3 text-cyan-500" />,
+  },
+  ollama: {
+    label: "Local",
+    dropdownLabel: "Local (Ollama)",
+    bg: "bg-emerald-50",
+    text: "text-emerald-700",
+    border: "border-emerald-200",
+    icon: <Laptop className="w-3 h-3 text-emerald-500" />,
+  },
+  qwen: {
+    label: "Qwen3-4B",
+    dropdownLabel: "Qwen3-4B (Local)",
+    bg: "bg-teal-50",
+    text: "text-teal-700",
+    border: "border-teal-200",
+    icon: <Cpu className="w-3 h-3 text-teal-500" />,
   },
 };
 
@@ -155,6 +180,8 @@ export default function ChatPage() {
       inputRef.current.style.height = "auto";
     }
 
+    const startTime = performance.now();
+
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
@@ -170,6 +197,9 @@ export default function ChatPage() {
         }),
       });
 
+      const clientElapsed = ((performance.now() - startTime) / 1000).toFixed(1) + "s";
+      const fallbackTime =
+        selectedModel === "ollama" ? `deepseek-r1:1.5b · ${clientElapsed}` : clientElapsed;
       const data = await res.json();
 
       if (!res.ok || !data.success) {
@@ -182,6 +212,7 @@ export default function ChatPage() {
         content: data.answer,
         sources: data.sources || [],
         model: selectedModel,
+        responseTime: data.responseTime || fallbackTime,
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
@@ -208,11 +239,11 @@ export default function ChatPage() {
     }
   };
 
-  const badge = MODEL_BADGE[selectedModel];
+  const badge = MODEL_BADGE[selectedModel] || MODEL_BADGE.gemini;
 
   return (
     <div className="flex flex-col h-[calc(100vh-4rem)] max-h-[calc(100vh-4rem)]">
-      {/* ── Page Header ─────────────────────────────────────────────────────── */}
+      {/* ── Page Header ──────────────────────────────────────────────────────────── */}
       <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-white shrink-0">
         {/* Left - branding */}
         <div className="flex items-center gap-3">
@@ -239,7 +270,7 @@ export default function ChatPage() {
               className={`inline-flex items-center gap-2 px-3 py-2 rounded-xl border text-xs font-semibold transition-all shadow-xs hover:shadow-sm ${badge.bg} ${badge.text} ${badge.border}`}
             >
               {badge.icon}
-              {badge.label}
+              {badge.dropdownLabel || badge.label}
               <ChevronDown
                 className={`w-3 h-3 transition-transform ${showModelMenu ? "rotate-180" : ""}`}
               />
@@ -251,7 +282,7 @@ export default function ChatPage() {
                   className="fixed inset-0 z-40"
                   onClick={() => setShowModelMenu(false)}
                 />
-                <div className="absolute right-0 mt-2 w-60 bg-white border border-slate-200 rounded-xl shadow-lg z-50 p-1.5 space-y-0.5">
+                <div className="absolute right-0 mt-2 w-64 bg-white border border-slate-200 rounded-xl shadow-lg z-50 p-1.5 space-y-0.5">
                   <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider px-2.5 pt-1.5 pb-1">
                     Select AI Model
                   </p>
@@ -299,6 +330,72 @@ export default function ChatPage() {
                       <span className="text-blue-500 text-xs font-bold">✓</span>
                     )}
                   </button>
+
+                  {/* DeepSeek option */}
+                  <button
+                    id="model-option-deepseek"
+                    onClick={() => { setSelectedModel("deepseek"); setShowModelMenu(false); }}
+                    className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left transition-all ${
+                      selectedModel === "deepseek"
+                        ? "bg-cyan-50 text-cyan-700"
+                        : "text-slate-700 hover:bg-slate-50"
+                    }`}
+                  >
+                    <div className="w-7 h-7 rounded-lg bg-cyan-100 flex items-center justify-center shrink-0">
+                      <Sparkles className="w-3.5 h-3.5 text-cyan-600" />
+                    </div>
+                    <div className="flex-1">
+                      <p className="font-semibold text-xs">DeepSeek</p>
+                      <p className="text-[10px] text-slate-500">DeepSeek Chat (Cloud)</p>
+                    </div>
+                    {selectedModel === "deepseek" && (
+                      <span className="text-cyan-500 text-xs font-bold">✓</span>
+                    )}
+                  </button>
+
+                  {/* Local (Ollama) option */}
+                  <button
+                    id="model-option-ollama"
+                    onClick={() => { setSelectedModel("ollama"); setShowModelMenu(false); }}
+                    className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left transition-all ${
+                      selectedModel === "ollama"
+                        ? "bg-emerald-50 text-emerald-700"
+                        : "text-slate-700 hover:bg-slate-50"
+                    }`}
+                  >
+                    <div className="w-7 h-7 rounded-lg bg-emerald-100 flex items-center justify-center shrink-0">
+                      <Laptop className="w-3.5 h-3.5 text-emerald-600" />
+                    </div>
+                    <div className="flex-1">
+                      <p className="font-semibold text-xs">Local (Ollama)</p>
+                      <p className="text-[10px] text-slate-500">deepseek-r1:1.5b · Offline</p>
+                    </div>
+                    {selectedModel === "ollama" && (
+                      <span className="text-emerald-500 text-xs font-bold">✓</span>
+                    )}
+                  </button>
+
+                  {/* Qwen3-4B (Local) option */}
+                  <button
+                    id="model-option-qwen"
+                    onClick={() => { setSelectedModel("qwen"); setShowModelMenu(false); }}
+                    className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left transition-all ${
+                      selectedModel === "qwen"
+                        ? "bg-teal-50 text-teal-700"
+                        : "text-slate-700 hover:bg-slate-50"
+                    }`}
+                  >
+                    <div className="w-7 h-7 rounded-lg bg-teal-100 flex items-center justify-center shrink-0">
+                      <Cpu className="w-3.5 h-3.5 text-teal-600" />
+                    </div>
+                    <div className="flex-1">
+                      <p className="font-semibold text-xs">Qwen3-4B (Local)</p>
+                      <p className="text-[10px] text-slate-500">qwen3:4b · Fast Local</p>
+                    </div>
+                    {selectedModel === "qwen" && (
+                      <span className="text-teal-500 text-xs font-bold">✓</span>
+                    )}
+                  </button>
                 </div>
               </>
             )}
@@ -327,7 +424,7 @@ export default function ChatPage() {
         </div>
       </div>
 
-      {/* ── Messages Area ────────────────────────────────────────────────────── */}
+      {/* ── Messages Area ────────────────────────────────────────────────────────── */}
       <div className="flex-1 overflow-y-auto bg-slate-50/50 px-4 py-6 space-y-6">
         {/* Empty State */}
         {messages.length === 0 && (
@@ -411,12 +508,13 @@ export default function ChatPage() {
                 <MarkdownContent content={msg.content} isUser={msg.role === "user"} />
               </div>
 
-              {/* Model badge on assistant messages */}
-              {msg.role === "assistant" && !msg.isError && msg.model && (
-                <div className="mt-1.5 flex items-center gap-1">
+              {/* Model badge and response time on assistant messages */}
+              {msg.role === "assistant" && !msg.isError && msg.model && MODEL_BADGE[msg.model] && (
+                <div className="mt-1.5 flex items-center gap-1.5">
                   {MODEL_BADGE[msg.model].icon}
                   <span className="text-[10px] text-slate-400 font-medium">
                     {MODEL_BADGE[msg.model].label}
+                    {msg.responseTime ? ` · ${msg.responseTime}` : ""}
                   </span>
                 </div>
               )}
@@ -466,7 +564,7 @@ export default function ChatPage() {
                 <Loader2 className="w-4 h-4 animate-spin text-indigo-500" />
                 <span>
                   Searching documents via{" "}
-                  <span className="font-semibold">{MODEL_BADGE[selectedModel].label}</span>...
+                  <span className="font-semibold">{MODEL_BADGE[selectedModel]?.dropdownLabel || MODEL_BADGE[selectedModel]?.label || selectedModel}</span>...
                 </span>
               </div>
             </div>
@@ -476,7 +574,7 @@ export default function ChatPage() {
         <div ref={messagesEndRef} />
       </div>
 
-      {/* ── Input Area ───────────────────────────────────────────────────────── */}
+      {/* ── Input Area ───────────────────────────────────────────────────────────── */}
       <div className="shrink-0 border-t border-slate-200 bg-white px-4 py-4">
         <div className="max-w-3xl mx-auto">
           <div className="flex gap-3 items-end">
