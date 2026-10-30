@@ -415,18 +415,48 @@ export async function POST(request: Request) {
       "list", "show", "tell", "find", "give", "docs", "documents",
       "file", "files", "details", "info", "information", "policy"
     ]);
-    const normalizeWord = (w: string) => w.toLowerCase().replace(/['"’]/g, "").replace(/s$/, "");
-    const cleanQ = standaloneQuestion.toLowerCase().replace(/['"’]/g, " ").replace(/[_W]+/g, " ").trim();
-    const rawQTokens = cleanQ.split(/\s+/).filter((w: string) => w.length >= 2 && !STOPWORDS.has(w));
-    const normQTokens = new Set(rawQTokens.map(normalizeWord));
 
-    const directDocs = (allDocsList || []).filter((d) => {
+    const cleanQ = standaloneQuestion.toLowerCase().replace(/['"’]/g, " ").replace(/[_W]+/g, " ").trim();
+    const qTokens = cleanQ.split(/\s+/).filter((w: string) => w.length >= 1 && !STOPWORDS.has(w));
+    const qTokenSet = new Set(qTokens);
+    const numbersInQuery = qTokens.filter((t: string) => /^\d+$/.test(t));
+
+    const scoredDocs: Array<{ doc: DocRecord; score: number }> = [];
+
+    for (const d of (allDocsList || []) as DocRecord[]) {
       const rawBase = d.file_name.toLowerCase().replace(/\.[^/.]+$/, "");
       const cleanBase = rawBase.replace(/['"’]/g, " ").replace(/[_W]+/g, " ").trim();
-      if (cleanQ.includes(cleanBase) || cleanBase.includes(cleanQ)) return true;
-      const fileTokens: string[] = cleanBase.split(/\s+/).filter((w: string) => w.length >= 2 && !["docx", "xlsx", "pdf", "doc"].includes(w) && !STOPWORDS.has(w));
-      return fileTokens.some((ft: string) => normQTokens.has(normalizeWord(ft)) || rawQTokens.includes(ft));
-    });
+      const fileTokens: string[] = cleanBase.split(/\s+/).filter((w: string) => w.length >= 1 && !["docx", "xlsx", "pdf", "doc"].includes(w) && !STOPWORDS.has(w));
+
+      // Exact phrase match
+      if (cleanQ.includes(cleanBase)) {
+        scoredDocs.push({ doc: d, score: 100 });
+        continue;
+      }
+
+      // If query mentions a specific number (e.g. 14), ensure file number matches
+      const fileNumbers = fileTokens.filter((t: string) => /^\d+$/.test(t));
+      if (numbersInQuery.length > 0) {
+        const numberMatched = numbersInQuery.some((nq: string) => fileNumbers.some((fn: string) => parseInt(fn, 10) === parseInt(nq, 10)));
+        if (!numberMatched && fileNumbers.length > 0) {
+          continue; // Skips mismatching numbers like bank_statement_01 when asking for 14
+        }
+      }
+
+      let matchedTokenCount = 0;
+      for (const ft of fileTokens) {
+        if (qTokenSet.has(ft) || qTokens.some((qt: string) => qt.includes(ft) || ft.includes(qt))) {
+          matchedTokenCount++;
+        }
+      }
+
+      if (matchedTokenCount >= 2 || (fileTokens.length === 1 && matchedTokenCount === 1)) {
+        scoredDocs.push({ doc: d, score: matchedTokenCount });
+      }
+    }
+
+    scoredDocs.sort((a, b) => b.score - a.score);
+    const directDocs = scoredDocs.slice(0, 3).map((s) => s.doc);
 
     let directChunks: ChunkMatch[] = [];
     if (directDocs.length > 0) {
