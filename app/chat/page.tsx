@@ -16,12 +16,11 @@ import {
   Cpu,
   Zap,
   RotateCcw,
-  Laptop,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-type ModelProvider = "groq" | "gemini" | "deepseek" | "ollama" | "qwen";
+type ModelProvider = "groq" | "gemini" | "deepseek";
 
 interface Source {
   documentId: string;
@@ -109,22 +108,6 @@ const MODEL_BADGE: Record<
     border: "border-cyan-200",
     icon: <Sparkles className="w-3 h-3 text-cyan-500" />,
   },
-  ollama: {
-    label: "Local",
-    dropdownLabel: "Local (Ollama)",
-    bg: "bg-emerald-50",
-    text: "text-emerald-700",
-    border: "border-emerald-200",
-    icon: <Laptop className="w-3 h-3 text-emerald-500" />,
-  },
-  qwen: {
-    label: "Qwen3-4B",
-    dropdownLabel: "Qwen3-4B (Local)",
-    bg: "bg-teal-50",
-    text: "text-teal-700",
-    border: "border-teal-200",
-    icon: <Cpu className="w-3 h-3 text-teal-500" />,
-  },
 };
 
 // ── Category badge colours ────────────────────────────────────────────────────
@@ -198,8 +181,7 @@ export default function ChatPage() {
       });
 
       const clientElapsed = ((performance.now() - startTime) / 1000).toFixed(1) + "s";
-      const fallbackTime =
-        selectedModel === "ollama" ? `deepseek-r1:1.5b · ${clientElapsed}` : clientElapsed;
+      const fallbackTime = clientElapsed;
       const data = await res.json();
 
       if (!res.ok || !data.success) {
@@ -353,50 +335,7 @@ export default function ChatPage() {
                     )}
                   </button>
 
-                  {/* Local (Ollama) option */}
-                  <button
-                    id="model-option-ollama"
-                    onClick={() => { setSelectedModel("ollama"); setShowModelMenu(false); }}
-                    className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left transition-all ${
-                      selectedModel === "ollama"
-                        ? "bg-emerald-50 text-emerald-700"
-                        : "text-slate-700 hover:bg-slate-50"
-                    }`}
-                  >
-                    <div className="w-7 h-7 rounded-lg bg-emerald-100 flex items-center justify-center shrink-0">
-                      <Laptop className="w-3.5 h-3.5 text-emerald-600" />
-                    </div>
-                    <div className="flex-1">
-                      <p className="font-semibold text-xs">Local (Ollama)</p>
-                      <p className="text-[10px] text-slate-500">deepseek-r1:1.5b · Offline</p>
-                    </div>
-                    {selectedModel === "ollama" && (
-                      <span className="text-emerald-500 text-xs font-bold">✓</span>
-                    )}
-                  </button>
-
-                  {/* Qwen3-4B (Local) option */}
-                  <button
-                    id="model-option-qwen"
-                    onClick={() => { setSelectedModel("qwen"); setShowModelMenu(false); }}
-                    className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left transition-all ${
-                      selectedModel === "qwen"
-                        ? "bg-teal-50 text-teal-700"
-                        : "text-slate-700 hover:bg-slate-50"
-                    }`}
-                  >
-                    <div className="w-7 h-7 rounded-lg bg-teal-100 flex items-center justify-center shrink-0">
-                      <Cpu className="w-3.5 h-3.5 text-teal-600" />
-                    </div>
-                    <div className="flex-1">
-                      <p className="font-semibold text-xs">Qwen3-4B (Local)</p>
-                      <p className="text-[10px] text-slate-500">qwen3:4b · Fast Local</p>
-                    </div>
-                    {selectedModel === "qwen" && (
-                      <span className="text-teal-500 text-xs font-bold">✓</span>
-                    )}
-                  </button>
-                </div>
+                  </div>
               </>
             )}
           </div>

@@ -3,7 +3,6 @@ import { supabase, isSupabaseConfigured } from "@/lib/supabase/client";
 import { generateEmbedding } from "@/lib/embeddings";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import OpenAI from "openai";
-import { Ollama } from "ollama";
 
 // Route config - raise execution timeout for local model inference
 export const maxDuration = 180;
@@ -16,12 +15,9 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
 const DEEPSEEK_BASE_URL = process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com";
 const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-chat";
 
-const OLLAMA_HOST = process.env.OLLAMA_HOST || "http://localhost:11434";
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "deepseek-r1:1.5b";
-const OLLAMA_QWEN_MODEL = process.env.OLLAMA_QWEN_MODEL || "qwen3:4b";
 
 // Types
-type ModelProvider = "groq" | "gemini" | "deepseek" | "ollama" | "qwen";
+type ModelProvider = "groq" | "gemini" | "deepseek";
 
 interface HistoryMessage {
   role: "user" | "assistant";
@@ -53,20 +49,6 @@ function getDeepSeekClient(): OpenAI {
   });
 }
 
-function getOllamaClient(): Ollama {
-  return new Ollama({
-    host: OLLAMA_HOST,
-  });
-}
-
-/**
- * Removes <think>...</think> reasoning blocks from model responses.
- */
-function cleanOllamaThinking(text: string): string {
-  let cleaned = text.replace(/<think>[\s\S]*?<\/think>/gi, "");
-  cleaned = cleaned.replace(/^<think>[\s\S]*$/gi, "");
-  return cleaned.trim() || text.trim();
-}
 
 // Intent detection for listing/count questions
 const LISTING_PATTERNS = [
@@ -165,29 +147,6 @@ async function rewriteQuestion(
         max_tokens: 120,
       });
       return completion.choices?.[0]?.message?.content?.trim() || question;
-    } else if (provider === "ollama") {
-      const client = getOllamaClient();
-      const response = await client.chat({
-        model: OLLAMA_MODEL,
-        messages: [{ role: "user", content: rewritePrompt }],
-        stream: false,
-        options: { num_ctx: 4096 },
-      });
-      const rawText = response.message?.content?.trim() || "";
-      const cleaned = cleanOllamaThinking(rawText);
-      return cleaned || question;
-    } else if (provider === "qwen") {
-      const client = getOllamaClient();
-      const response = await client.chat({
-        model: OLLAMA_QWEN_MODEL,
-        messages: [{ role: "user", content: rewritePrompt + " /no_think" }],
-        stream: false,
-        options: { num_ctx: 4096 },
-        keep_alive: "30m",
-      });
-      const rawText = response.message?.content?.trim() || "";
-      const cleaned = cleanOllamaThinking(rawText);
-      return cleaned || question;
     } else {
       const key = process.env.GROQ_API_KEY;
       if (!key) return question;
@@ -270,7 +229,7 @@ async function callGemini(
   } catch (err: any) {
     const msg = err?.message || String(err);
     if (msg.includes("429") || msg.toLowerCase().includes("quota") || msg.toLowerCase().includes("too many requests") || msg.toLowerCase().includes("rate limit")) {
-      throw new Error("Model limit reached. The daily free-tier quota for Gemini has been exceeded. Please switch to Groq, Local (Ollama), or Qwen3-4B using the model button above, or try again tomorrow.");
+      throw new Error("Model limit reached. The daily free-tier quota for Gemini has been exceeded. Please switch to Groq or DeepSeek using the model button above, or try again tomorrow.");
     }
     throw err;
   }
@@ -329,133 +288,6 @@ async function callDeepSeek(
   }
 }
 
-async function callOllama(
-  systemPrompt: string,
-  userMessage: string,
-  history: HistoryMessage[]
-): Promise<string> {
-  const client = getOllamaClient();
-
-  const historyTurns = history.slice(-8).map((m) => ({
-    role: m.role === "assistant" ? "assistant" : "user",
-    content: m.content,
-  }));
-
-  try {
-    // Timeout of 180 seconds for local model execution
-    const chatPromise = client.chat({
-      model: OLLAMA_MODEL,
-      messages: [
-        { role: "system", content: systemPrompt },
-        ...historyTurns,
-        { role: "user", content: userMessage },
-      ],
-      stream: false,
-      options: { num_ctx: 4096 },
-    });
-
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("Ollama request timed out after 180 seconds.")), 180000)
-    );
-
-    const response = await Promise.race([chatPromise, timeoutPromise]);
-    const rawContent = response.message?.content?.trim() || "";
-    const cleanContent = cleanOllamaThinking(rawContent);
-    return cleanContent || "I could not generate an answer. Please try again.";
-  } catch (err: unknown) {
-    console.error("Ollama API error:", err);
-    const msg = err instanceof Error ? err.message : String(err);
-    const lower = msg.toLowerCase();
-
-    if (
-      lower.includes("econnrefused") ||
-      lower.includes("connection refused") ||
-      lower.includes("failed to fetch") ||
-      lower.includes("connect econnrefused") ||
-      lower.includes("fetch failed")
-    ) {
-      throw new Error("Ollama is not running. Start Ollama and try again.");
-    }
-
-    if (
-      lower.includes("not found") ||
-      lower.includes("try pulling it") ||
-      (err as any)?.status === 404
-    ) {
-      throw new Error(`Model not downloaded. Run: ollama pull ${OLLAMA_MODEL}`);
-    }
-
-    throw new Error(`Ollama error: ${msg}`);
-  }
-}
-
-async function callQwen(
-  systemPrompt: string,
-  userMessage: string,
-  history: HistoryMessage[]
-): Promise<string> {
-  const client = getOllamaClient();
-
-  const historyTurns = history.slice(-8).map((m) => ({
-    role: m.role === "assistant" ? "assistant" : "user",
-    content: m.content,
-  }));
-
-  // Specific instruction required for Qwen3-4B
-  const qwenInstruction = "Answer only from the provided document text. If the answer is not in the documents, say it is not in the documents. Do not use outside knowledge.";
-  const qwenSystemPrompt = `${systemPrompt}\n\n${qwenInstruction}`;
-
-  // Turn off thinking mode for speed: append " /no_think" to the end of the final user message
-  const qwenUserMessage = userMessage.endsWith(" /no_think") ? userMessage : `${userMessage} /no_think`;
-
-  try {
-    const chatPromise = client.chat({
-      model: OLLAMA_QWEN_MODEL,
-      messages: [
-        { role: "system", content: qwenSystemPrompt },
-        ...historyTurns,
-        { role: "user", content: qwenUserMessage },
-      ],
-      stream: false,
-      options: { num_ctx: 4096 },
-      keep_alive: "30m",
-    });
-
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("Ollama request timed out after 180 seconds.")), 180000)
-    );
-
-    const response = await Promise.race([chatPromise, timeoutPromise]);
-    const rawContent = response.message?.content?.trim() || "";
-    const cleanContent = cleanOllamaThinking(rawContent);
-    return cleanContent || "I could not generate an answer. Please try again.";
-  } catch (err: unknown) {
-    console.error("Qwen (Ollama) API error:", err);
-    const msg = err instanceof Error ? err.message : String(err);
-    const lower = msg.toLowerCase();
-
-    if (
-      lower.includes("econnrefused") ||
-      lower.includes("connection refused") ||
-      lower.includes("failed to fetch") ||
-      lower.includes("connect econnrefused") ||
-      lower.includes("fetch failed")
-    ) {
-      throw new Error("Ollama is not running. Start Ollama and try again.");
-    }
-
-    if (
-      lower.includes("not found") ||
-      lower.includes("try pulling it") ||
-      (err as any)?.status === 404
-    ) {
-      throw new Error(`Model not downloaded. Run: ollama pull ${OLLAMA_QWEN_MODEL}`);
-    }
-
-    throw new Error(`Ollama error: ${msg}`);
-  }
-}
-
 async function generateAnswer(
   provider: ModelProvider,
   systemPrompt: string,
@@ -466,10 +298,6 @@ async function generateAnswer(
     return callGemini(systemPrompt, userMessage, history);
   } else if (provider === "deepseek") {
     return callDeepSeek(systemPrompt, userMessage, history);
-  } else if (provider === "ollama") {
-    return callOllama(systemPrompt, userMessage, history);
-  } else if (provider === "qwen") {
-    return callQwen(systemPrompt, userMessage, history);
   } else {
     return callGroq(systemPrompt, userMessage, history);
   }
@@ -490,10 +318,6 @@ export async function POST(request: Request) {
         ? "groq"
         : modelParam === "deepseek"
         ? "deepseek"
-        : modelParam === "ollama"
-        ? "ollama"
-        : modelParam === "qwen"
-        ? "qwen"
         : "gemini";
     const conversationHistory: HistoryMessage[] = Array.isArray(history) ? history : [];
 
@@ -505,11 +329,7 @@ export async function POST(request: Request) {
 
     // Helper to format response time label
     const getFormattedResponseTime = () => {
-      const durationSec = ((Date.now() - startTime) / 1000).toFixed(1) + "s";
-      if (provider === "ollama") {
-        return `${OLLAMA_MODEL} · ${durationSec}`;
-      }
-      return durationSec;
+      return ((Date.now() - startTime) / 1000).toFixed(1) + "s";
     };
 
     // Route A: Listing / count - query documents table directly
@@ -563,7 +383,7 @@ export async function POST(request: Request) {
 
       const systemPrompt = `You are DocuDash AI. Present the EXACT document inventory data below clearly in natural language. Do NOT add or remove items.\n\nData:\n---\n${listingContext}\n---`;
       const answer = await generateAnswer(provider, systemPrompt, `Question: ${q}`, conversationHistory);
-      const sources = docs.slice(0, 20).map((d) => ({ documentId: d.id, fileName: d.file_name, category: d.category }));
+      const sources = intent.isCountOnly ? [] : docs.slice(0, 10).map((d) => ({ documentId: d.id, fileName: d.file_name, category: d.category }));
       const responseTime = getFormattedResponseTime();
 
       return NextResponse.json({
@@ -589,10 +409,23 @@ export async function POST(request: Request) {
 
     // Step 2: Direct Document Mention Lookup (Hybrid Retrieval)
     const { data: allDocsList } = await supabase.from("documents").select("id, file_name, category");
-    const normQ = standaloneQuestion.toLowerCase().replace(/[_-]/g, " ");
+    const STOPWORDS = new Set([
+      "what", "when", "where", "which", "who", "how", "why", "whose",
+      "the", "and", "for", "about", "with", "from", "into", "under",
+      "list", "show", "tell", "find", "give", "docs", "documents",
+      "file", "files", "details", "info", "information", "policy"
+    ]);
+    const normalizeWord = (w: string) => w.toLowerCase().replace(/['"’]/g, "").replace(/s$/, "");
+    const cleanQ = standaloneQuestion.toLowerCase().replace(/['"’]/g, " ").replace(/[_W]+/g, " ").trim();
+    const rawQTokens = cleanQ.split(/\s+/).filter((w: string) => w.length >= 2 && !STOPWORDS.has(w));
+    const normQTokens = new Set(rawQTokens.map(normalizeWord));
+
     const directDocs = (allDocsList || []).filter((d) => {
-      const baseName = d.file_name.toLowerCase().replace(/\.[^/.]+$/, "").replace(/[_-]/g, " ");
-      return normQ.includes(baseName) || (baseName.length > 5 && normQ.includes(baseName));
+      const rawBase = d.file_name.toLowerCase().replace(/\.[^/.]+$/, "");
+      const cleanBase = rawBase.replace(/['"’]/g, " ").replace(/[_W]+/g, " ").trim();
+      if (cleanQ.includes(cleanBase) || cleanBase.includes(cleanQ)) return true;
+      const fileTokens: string[] = cleanBase.split(/\s+/).filter((w: string) => w.length >= 2 && !["docx", "xlsx", "pdf", "doc"].includes(w) && !STOPWORDS.has(w));
+      return fileTokens.some((ft: string) => normQTokens.has(normalizeWord(ft)) || rawQTokens.includes(ft));
     });
 
     let directChunks: ChunkMatch[] = [];
