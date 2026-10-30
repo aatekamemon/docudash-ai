@@ -482,19 +482,24 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: false, error: `Similarity search failed: ${rpcErr.message}` }, { status: 500 });
     }
 
-    // Merge direct chunks first, then vector chunks (deduplicated)
+    // If a specific document was explicitly targeted (e.g. statement 14, Aateka CV),
+    // prioritize its chunks exclusively so other random documents don't dilute context.
     const seenChunkIds = new Set<string>();
     const matchedChunks: ChunkMatch[] = [];
-    for (const c of directChunks) {
-      if (!seenChunkIds.has(c.id)) {
-        seenChunkIds.add(c.id);
-        matchedChunks.push(c);
+
+    if (directChunks.length > 0) {
+      for (const c of directChunks) {
+        if (!seenChunkIds.has(c.id)) {
+          seenChunkIds.add(c.id);
+          matchedChunks.push(c);
+        }
       }
-    }
-    for (const c of (chunks || [])) {
-      if (!seenChunkIds.has(c.id)) {
-        seenChunkIds.add(c.id);
-        matchedChunks.push(c);
+    } else {
+      for (const c of (chunks || [])) {
+        if (!seenChunkIds.has(c.id)) {
+          seenChunkIds.add(c.id);
+          matchedChunks.push(c);
+        }
       }
     }
 
@@ -546,8 +551,8 @@ export async function POST(request: Request) {
     const answer = await generateAnswer(provider, systemPrompt, q, conversationHistory);
     const responseTime = getFormattedResponseTime();
 
-    // Step 8: Sources
-    const sources = documentIds.map((docId) => ({
+    // Step 8: Sources (strictly from matched documents, limited to top 3)
+    const sources = documentIds.slice(0, 3).map((docId) => ({
       documentId: docId,
       fileName: docMap[docId]?.file_name ?? "Unknown Document",
       category: docMap[docId]?.category ?? "General",
